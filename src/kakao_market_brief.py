@@ -24,7 +24,7 @@ except ImportError:
 KST = ZoneInfo("Asia/Seoul")
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 KAKAO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
-MARKET_LINK = "https://finance.naver.com/"
+MARKET_LINK = "https://m.stock.naver.com/"
 
 KOREA_WATCHLIST = {
     "005930.KS": "삼성전자",
@@ -285,6 +285,7 @@ def simple_report(
             "- 국내: 반도체, 자동차, 금융, 2차전지 업종 수급",
             "- 미국: 대형 기술주, 헬스케어, 금리 민감 업종 흐름",
             "- 매크로: 환율, 미 국채금리, 원유, 지정학 뉴스",
+            f"- 시장 바로가기: {MARKET_LINK}",
             "",
             "주의: 자동화된 관심종목 후보이며 매수/매도 지시가 아닙니다.",
         ]
