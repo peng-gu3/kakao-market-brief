@@ -24,6 +24,7 @@ except ImportError:
 KST = ZoneInfo("Asia/Seoul")
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 KAKAO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
+MARKET_LINK = "https://finance.naver.com/"
 
 KOREA_WATCHLIST = {
     "005930.KS": "삼성전자",
@@ -385,8 +386,8 @@ def send_kakao_message(text: str) -> None:
             "object_type": "text",
             "text": prefix + chunk,
             "link": {
-                "web_url": "https://finance.yahoo.com/",
-                "mobile_web_url": "https://finance.yahoo.com/",
+                "web_url": MARKET_LINK,
+                "mobile_web_url": MARKET_LINK,
             },
             "button_title": "시장 확인",
         }
