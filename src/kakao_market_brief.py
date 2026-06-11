@@ -61,6 +61,9 @@ US_MARKET_TICKERS = {
     "^IXIC": "NASDAQ",
     "^DJI": "Dow",
     "KRW=X": "USD/KRW",
+    "^TNX": "미국 10년물 금리",
+    "CL=F": "WTI 유가",
+    "BTC-USD": "비트코인",
 }
 
 NEWS_FEEDS = {
@@ -85,6 +88,14 @@ class Pick:
 class NewsItem:
     title: str
     link: str
+
+
+@dataclass
+class Indicator:
+    name: str
+    value: float
+    change: float
+    display: str
 
 
 def pct_change(series, days: int) -> float:
@@ -144,8 +155,13 @@ def fetch_krx_index_snapshot() -> list[str]:
     return lines
 
 
-def fetch_yahoo_market_snapshot() -> list[str]:
-    lines = []
+def fetch_yahoo_market_snapshot(indicators: list[Indicator] | None = None) -> list[str]:
+    indicators = indicators or fetch_macro_indicators()
+    return [indicator.display for indicator in indicators]
+
+
+def fetch_macro_indicators() -> list[Indicator]:
+    indicators = []
     for ticker, name in US_MARKET_TICKERS.items():
         try:
             history = yf.Ticker(ticker).history(period="7d", interval="1d", auto_adjust=False)
@@ -153,13 +169,25 @@ def fetch_yahoo_market_snapshot() -> list[str]:
             if len(close) < 2:
                 continue
             change = pct_change(close, 1)
-            lines.append(f"{name}: {close.iloc[-1]:,.2f} ({change:+.2f}%)")
+            value = float(close.iloc[-1])
+            suffix = "%"
+            if ticker == "^TNX":
+                display = f"{name}: {value:.2f}%p ({change:+.2f}%)"
+            elif ticker == "KRW=X":
+                display = f"{name}: {value:,.2f}원 ({change:+.2f}%)"
+            elif ticker == "BTC-USD":
+                display = f"{name}: ${value:,.0f} ({change:+.2f}%)"
+            elif ticker == "CL=F":
+                display = f"{name}: ${value:,.2f} ({change:+.2f}%)"
+            else:
+                display = f"{name}: {value:,.2f} ({change:+.2f}%)"
+            indicators.append(Indicator(name, value, change, display))
         except Exception:
             continue
-    return lines
+    return indicators
 
 
-def fetch_market_snapshot() -> list[str]:
+def fetch_market_snapshot(indicators: list[Indicator] | None = None) -> list[str]:
     krx_lines = fetch_krx_index_snapshot()
     if not krx_lines:
         # pykrx 설치 전에도 돌아가게 하기 위한 임시 대체값입니다.
@@ -172,7 +200,7 @@ def fetch_market_snapshot() -> list[str]:
                 krx_lines.append(f"{name}: {close.iloc[-1]:,.2f} ({pct_change(close, 1):+.2f}%, Yahoo)")
             except Exception:
                 continue
-    return krx_lines + fetch_yahoo_market_snapshot()
+    return krx_lines + fetch_yahoo_market_snapshot(indicators)
 
 
 def fetch_news() -> dict[str, list[NewsItem]]:
@@ -224,28 +252,139 @@ def pick_risk(pick: Pick) -> str:
     return "시장 전체 변동성, 환율, 금리 뉴스에 따른 흔들림"
 
 
+def check_price_text(pick: Pick) -> str:
+    breakout = pick.close * 1.02
+    support = pick.close * 0.97
+    return f"체크 가격대: {breakout:,.2f} 상향 돌파 시 관심, {support:,.2f} 이탈 시 보수적 대응"
+
+
+def market_temperature(markets: list[str], indicators: list[Indicator]) -> tuple[str, str]:
+    score = 50
+    reasons = []
+
+    joined = "\n".join(markets)
+    if "KOSPI" in joined and "+" in joined:
+        score += 8
+        reasons.append("국내 대표지수 양호")
+    if "NASDAQ" in joined and "-" in joined:
+        score -= 8
+        reasons.append("미국 성장주 약세")
+
+    for item in indicators:
+        if item.name == "USD/KRW":
+            if item.change > 0.4:
+                score -= 8
+                reasons.append("환율 상승 부담")
+            elif item.change < -0.3:
+                score += 5
+                reasons.append("환율 안정")
+        elif item.name == "미국 10년물 금리":
+            if item.change > 1:
+                score -= 7
+                reasons.append("미 금리 상승")
+            elif item.change < -1:
+                score += 5
+                reasons.append("미 금리 하락")
+        elif item.name == "WTI 유가" and item.change > 2:
+            score -= 4
+            reasons.append("유가 상승")
+        elif item.name == "비트코인":
+            if item.change > 2:
+                score += 4
+                reasons.append("위험자산 선호")
+            elif item.change < -2:
+                score -= 4
+                reasons.append("위험자산 약세")
+
+    score = max(0, min(100, score))
+    if score >= 65:
+        label = f"{score}/100, 위험선호"
+    elif score >= 45:
+        label = f"{score}/100, 중립"
+    else:
+        label = f"{score}/100, 방어적"
+    return label, ", ".join(reasons[:4]) or "뚜렷한 방향성은 제한적"
+
+
+def one_line_conclusion(temperature: str, markets: list[str], indicators: list[Indicator]) -> str:
+    text = "오늘은 확인 후 대응이 유리한 중립 장세입니다."
+    if "위험선호" in temperature:
+        text = "오늘은 강한 종목 위주로 선별 접근할 수 있는 장세입니다."
+    elif "방어적" in temperature:
+        text = "오늘은 추격보다 현금 비중과 리스크 관리가 우선인 장세입니다."
+
+    for item in indicators:
+        if item.name == "USD/KRW" and item.change > 0.4:
+            return text + " 특히 환율 상승 부담을 같이 봐야 합니다."
+        if item.name == "NASDAQ" and item.change < -1:
+            return text + " 미국 기술주 약세가 국내 성장주에 부담이 될 수 있습니다."
+    return text
+
+
+def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -> list[str]:
+    titles = " ".join(item.title for items in news.values() for item in items).lower()
+    checks = []
+
+    sector_keywords = [
+        ("반도체", ["semiconductor", "chip", "nvidia", "삼성전자", "sk하이닉스", "반도체"]),
+        ("2차전지", ["battery", "배터리", "2차전지", "전기차", "ev"]),
+        ("자동차", ["auto", "자동차", "현대차", "기아"]),
+        ("금융", ["bank", "금리", "은행", "금융"]),
+        ("조선/방산", ["shipbuilding", "defense", "조선", "방산"]),
+        ("바이오", ["bio", "healthcare", "제약", "바이오"]),
+        ("AI/전력", ["ai", "power", "electricity", "data center", "전력", "데이터센터"]),
+    ]
+
+    for sector, keywords in sector_keywords:
+        hit = any(keyword in titles for keyword in keywords)
+        if hit:
+            checks.append(f"- {sector}: 관련 뉴스가 있어 장중 수급 확인")
+        else:
+            checks.append(f"- {sector}: 뉴스 모멘텀은 제한적, 지수 대비 상대강도 확인")
+
+    for item in indicators:
+        if item.name == "미국 10년물 금리" and item.change > 1:
+            checks.append("- 성장주: 금리 상승 부담으로 추격 매수 자제")
+        if item.name == "WTI 유가" and item.change > 2:
+            checks.append("- 정유/화학/항공: 유가 영향 확인")
+    return checks[:8]
+
+
 def simple_report(
     weather: str,
     markets: list[str],
+    indicators: list[Indicator],
     news: dict[str, list[NewsItem]],
     korea: list[Pick],
     us: list[Pick],
 ) -> str:
     today = datetime.now(KST).strftime("%Y-%m-%d")
+    temperature, temperature_reason = market_temperature(markets, indicators)
+    conclusion = one_line_conclusion(temperature, markets, indicators)
     lines = [
         f"[{today} 08:00] 데일리 시황 브리프",
+        "",
+        f"한 줄 결론: {conclusion}",
+        f"시장 온도계: {temperature}",
+        f"온도계 근거: {temperature_reason}",
         "",
         f"날씨: {weather}",
         "",
         "1. 시장 체크",
         *[f"- {line}" for line in markets],
         "",
-        "2. 오늘의 해석",
+        "2. 환율/금리/유가/비트코인",
+        *[f"- {item.display}" for item in indicators if item.name in {"USD/KRW", "미국 10년물 금리", "WTI 유가", "비트코인"}],
+        "",
+        "3. 오늘의 해석",
         "- 국내 지수는 KRX 데이터를 우선 사용합니다. 값 옆에 Yahoo가 붙으면 임시 대체 데이터입니다.",
         "- 미국 지수와 환율은 Yahoo Finance 데이터를 사용합니다.",
         "- 관심종목은 중대형주 안에서 1일, 5일, 20일 흐름을 섞어 고릅니다.",
         "",
-        "3. 주요뉴스",
+        "4. 섹터별 체크",
+        *sector_check(news, indicators),
+        "",
+        "5. 주요뉴스",
     ]
 
     for section, items in news.items():
@@ -254,7 +393,7 @@ def simple_report(
             lines.append(f"- {item.title}")
             lines.append(f"  {item.link}")
 
-    lines.extend(["", "4. 국내 중대형주 관심후보"])
+    lines.extend(["", "6. 국내 중대형주 관심후보"])
     for pick in korea:
         lines.extend(
             [
@@ -262,11 +401,12 @@ def simple_report(
                 f"  현재가: {pick.close:,.2f}",
                 f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
                 f"  근거: {pick_commentary(pick)}",
+                f"  {check_price_text(pick)}",
                 f"  리스크: {pick_risk(pick)}",
             ]
         )
 
-    lines.extend(["", "5. 미국 중대형주 관심후보"])
+    lines.extend(["", "7. 미국 중대형주 관심후보"])
     for pick in us:
         lines.extend(
             [
@@ -274,6 +414,7 @@ def simple_report(
                 f"  현재가: {pick.close:,.2f}",
                 f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
                 f"  근거: {pick_commentary(pick)}",
+                f"  {check_price_text(pick)}",
                 f"  리스크: {pick_risk(pick)}",
             ]
         )
@@ -281,7 +422,7 @@ def simple_report(
     lines.extend(
         [
             "",
-            "6. 오늘 확인할 것",
+            "8. 오늘 확인할 것",
             "- 국내: 반도체, 자동차, 금융, 2차전지 업종 수급",
             "- 미국: 대형 기술주, 헬스케어, 금리 민감 업종 흐름",
             "- 매크로: 환율, 미 국채금리, 원유, 지정학 뉴스",
@@ -403,11 +544,12 @@ def send_kakao_message(text: str) -> None:
 
 def build_report() -> str:
     weather = fetch_weather()
-    markets = fetch_market_snapshot()
+    indicators = fetch_macro_indicators()
+    markets = fetch_market_snapshot(indicators)
     news = fetch_news()
     korea = score_watchlist(KOREA_WATCHLIST)
     us = score_watchlist(US_WATCHLIST)
-    draft = simple_report(weather, markets, news, korea, us)
+    draft = simple_report(weather, markets, indicators, news, korea, us)
     return ai_refine_report(draft)
 
 
