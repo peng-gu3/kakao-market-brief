@@ -1,22 +1,16 @@
 import json
 import os
-import textwrap
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 import feedparser
 import requests
 import yfinance as yf
 from dotenv import load_dotenv
-
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
 
 try:
     from pykrx import stock
@@ -27,7 +21,7 @@ KST = ZoneInfo("Asia/Seoul")
 UTC = ZoneInfo("UTC")
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 KAKAO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
-REPORT_PAGE_URL = os.getenv("REPORT_PAGE_URL", "https://peng-gu3.github.io/kakao-market-brief/")
+DEFAULT_REPORT_PAGE_URL = "https://peng-gu3.github.io/kakao-market-brief/"
 REPORT_OUTPUT_PATH = os.getenv("REPORT_OUTPUT_PATH", "docs/index.html")
 
 KOREA_WATCHLIST = {
@@ -75,6 +69,7 @@ NEWS_QUERIES = {
     "세계 주요뉴스": "global economy geopolitics markets oil rates when:1d",
 }
 
+
 @dataclass
 class Indicator:
     name: str
@@ -83,12 +78,14 @@ class Indicator:
     as_of: str
     unit: str = ""
 
+
 @dataclass
 class NewsItem:
     section: str
     title: str
     link: str
     published_at: datetime | None
+
 
 @dataclass
 class Pick:
@@ -108,6 +105,17 @@ def now_kst() -> datetime:
     return datetime.now(KST)
 
 
+def report_page_url() -> str:
+    value = os.getenv("REPORT_PAGE_URL", DEFAULT_REPORT_PAGE_URL).strip() or DEFAULT_REPORT_PAGE_URL
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return DEFAULT_REPORT_PAGE_URL
+    if host.endswith(".local"):
+        return DEFAULT_REPORT_PAGE_URL
+    return value if value.endswith("/") else value + "/"
+
+
 def fmt_dt(dt: datetime | None) -> str:
     if dt is None:
         return "시간 미확인"
@@ -120,11 +128,6 @@ def fmt_change(value: float) -> str:
     if value < 0:
         return f"▼ {abs(value):.2f}%"
     return "━ 0.00%"
-
-
-def compact(text: str, limit: int = 58) -> str:
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def latest_label(index) -> str:
@@ -154,24 +157,33 @@ def fetch_weather() -> str:
     city = os.getenv("REPORT_CITY", "Busan")
     lat = os.getenv("REPORT_LAT", "35.1796")
     lon = os.getenv("REPORT_LON", "129.0756")
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lat}&longitude={lon}&current=temperature_2m,precipitation,wind_speed_10m"
-        "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-        "&timezone=Asia%2FSeoul&forecast_days=1"
-    )
-    try:
-        data = requests.get(url, timeout=20).json()
-        current = data["current"]
-        daily = data["daily"]
-        return (
-            f"{city} 현재 {current['temperature_2m']}도, 강수 {current['precipitation']}mm, "
-            f"풍속 {current['wind_speed_10m']}km/h. "
-            f"오늘 {daily['temperature_2m_min'][0]}~{daily['temperature_2m_max'][0]}도, "
-            f"강수확률 {daily['precipitation_probability_max'][0]}%."
-        )
-    except Exception as exc:
-        return f"날씨 정보를 가져오지 못했습니다: {exc}"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "current": "temperature_2m,precipitation,wind_speed_10m",
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "timezone": "Asia/Seoul",
+        "forecast_days": 1,
+    }
+    url = "https://api.open-meteo.com/v1/forecast"
+    for timeout in (8, 12):
+        try:
+            response = requests.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+            current = data["current"]
+            daily = data["daily"]
+            return (
+                f"{city} 현재 {current['temperature_2m']}도, 강수 {current['precipitation']}mm, "
+                f"풍속 {current['wind_speed_10m']}km/h. "
+                f"오늘 {daily['temperature_2m_min'][0]}~{daily['temperature_2m_max'][0]}도, "
+                f"강수확률 {daily['precipitation_probability_max'][0]}%."
+            )
+        except requests.RequestException:
+            continue
+        except (KeyError, IndexError, TypeError, ValueError):
+            break
+    return f"{city} 날씨는 외부 날씨 API 응답 지연으로 이번 브리핑에서는 생략했습니다."
 
 
 def fetch_krx_indices() -> list[Indicator]:
@@ -232,7 +244,10 @@ def fetch_news() -> list[NewsItem]:
     items = []
     cutoff = now_kst() - timedelta(hours=48)
     for section, query in NEWS_QUERIES.items():
-        feed = feedparser.parse(news_url(query))
+        try:
+            feed = feedparser.parse(news_url(query))
+        except Exception:
+            continue
         for entry in feed.entries[:8]:
             published = parse_published(entry)
             if published and published < cutoff:
@@ -338,7 +353,7 @@ def render_kakao_summary(weather: str, indicators: list[Indicator], picks: list[
         "",
         f"날씨: {weather}",
         "",
-        "자세한 뉴스 링크, 지수표, 선정 근거는 아래 버튼의 전체 페이지에서 확인하실 수 있습니다.",
+        "상세 뉴스 링크, 지표표, 선정 근거는 아래 버튼의 전체 페이지에서 확인하실 수 있습니다.",
         "주의: 자동화된 관심후보이며 매수/매도 지시가 아닙니다.",
     ])
     return "\n".join(lines)
@@ -424,10 +439,11 @@ def refresh_kakao_access_token() -> str:
 
 def send_kakao_message(text: str) -> None:
     access_token = refresh_kakao_access_token()
+    url = report_page_url()
     template = {
         "object_type": "text",
         "text": text,
-        "link": {"web_url": REPORT_PAGE_URL, "mobile_web_url": REPORT_PAGE_URL},
+        "link": {"web_url": url, "mobile_web_url": url},
         "button_title": "전체 브리핑 보기",
     }
     response = requests.post(
@@ -456,6 +472,7 @@ def main() -> None:
     if os.getenv("DRY_RUN") == "1" or os.getenv("SEND_KAKAO") == "0":
         return
     send_kakao_message(summary)
+
 
 if __name__ == "__main__":
     main()
