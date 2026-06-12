@@ -44,21 +44,6 @@ KOREA_WATCHLIST = {
     "012330.KS": "현대모비스",
 }
 
-US_WATCHLIST = {
-    "AAPL": "Apple",
-    "MSFT": "Microsoft",
-    "NVDA": "NVIDIA",
-    "AMZN": "Amazon",
-    "GOOGL": "Alphabet",
-    "META": "Meta",
-    "AVGO": "Broadcom",
-    "JPM": "JPMorgan Chase",
-    "XOM": "Exxon Mobil",
-    "LLY": "Eli Lilly",
-    "UNH": "UnitedHealth",
-    "COST": "Costco",
-}
-
 US_MARKET_TICKERS = {
     "^GSPC": "S&P 500",
     "^IXIC": "NASDAQ",
@@ -140,13 +125,7 @@ def pct_change(series, days: int) -> float:
 
 
 def news_feed_url(query: str) -> str:
-    params = {
-        "q": query,
-        "hl": "ko",
-        "gl": "KR",
-        "ceid": "KR:ko",
-        "_": str(int(time.time())),
-    }
+    params = {"q": query, "hl": "ko", "gl": "KR", "ceid": "KR:ko", "_": str(int(time.time()))}
     return "https://news.google.com/rss/search?" + urlencode(params)
 
 
@@ -182,10 +161,8 @@ def fetch_krx_index_snapshot() -> list[str]:
     today = now_kst().date()
     start = (today - timedelta(days=14)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
-    indices = {"1001": "KOSPI", "2001": "KOSDAQ"}
     lines = []
-
-    for code, name in indices.items():
+    for code, name in {"1001": "KOSPI", "2001": "KOSDAQ"}.items():
         try:
             frame = stock.get_index_ohlcv_by_date(start, end, code)
             if frame.empty or len(frame) < 2:
@@ -228,11 +205,6 @@ def fetch_macro_indicators() -> list[Indicator]:
     return indicators
 
 
-def fetch_yahoo_market_snapshot(indicators: list[Indicator] | None = None) -> list[str]:
-    indicators = indicators or fetch_macro_indicators()
-    return [indicator.display for indicator in indicators]
-
-
 def fetch_market_snapshot(indicators: list[Indicator] | None = None) -> list[str]:
     krx_lines = fetch_krx_index_snapshot()
     if not krx_lines:
@@ -243,12 +215,11 @@ def fetch_market_snapshot(indicators: list[Indicator] | None = None) -> list[str
                 if len(close) < 2:
                     continue
                 as_of = latest_index_label(close.index)
-                krx_lines.append(
-                    f"{name}: {close.iloc[-1]:,.2f} ({pct_change(close, 1):+.2f}%, Yahoo, 기준 {as_of})"
-                )
+                krx_lines.append(f"{name}: {close.iloc[-1]:,.2f} ({pct_change(close, 1):+.2f}%, Yahoo, 기준 {as_of})")
             except Exception:
                 continue
-    return krx_lines + fetch_yahoo_market_snapshot(indicators)
+    indicators = indicators or fetch_macro_indicators()
+    return krx_lines + [indicator.display for indicator in indicators]
 
 
 def parse_published(entry) -> datetime | None:
@@ -321,7 +292,6 @@ def check_price_text(pick: Pick) -> str:
 def market_temperature(markets: list[str], indicators: list[Indicator]) -> tuple[str, str]:
     score = 50
     reasons = []
-
     joined = "\n".join(markets)
     if "KOSPI" in joined and "+" in joined:
         score += 8
@@ -329,50 +299,39 @@ def market_temperature(markets: list[str], indicators: list[Indicator]) -> tuple
     if "NASDAQ" in joined and "-" in joined:
         score -= 8
         reasons.append("미국 성장주 약세")
-
     for item in indicators:
-        if item.name == "USD/KRW":
-            if item.change > 0.4:
-                score -= 8
-                reasons.append("환율 상승 부담")
-            elif item.change < -0.3:
-                score += 5
-                reasons.append("환율 안정")
-        elif item.name == "미국 10년물 금리":
-            if item.change > 1:
-                score -= 7
-                reasons.append("미 금리 상승")
-            elif item.change < -1:
-                score += 5
-                reasons.append("미 금리 하락")
+        if item.name == "USD/KRW" and item.change > 0.4:
+            score -= 8
+            reasons.append("환율 상승 부담")
+        elif item.name == "USD/KRW" and item.change < -0.3:
+            score += 5
+            reasons.append("환율 안정")
+        elif item.name == "미국 10년물 금리" and item.change > 1:
+            score -= 7
+            reasons.append("미 금리 상승")
+        elif item.name == "미국 10년물 금리" and item.change < -1:
+            score += 5
+            reasons.append("미 금리 하락")
         elif item.name == "WTI 유가" and item.change > 2:
             score -= 4
             reasons.append("유가 상승")
-        elif item.name == "비트코인":
-            if item.change > 2:
-                score += 4
-                reasons.append("위험자산 선호")
-            elif item.change < -2:
-                score -= 4
-                reasons.append("위험자산 약세")
-
+        elif item.name == "비트코인" and item.change > 2:
+            score += 4
+            reasons.append("위험자산 선호")
+        elif item.name == "비트코인" and item.change < -2:
+            score -= 4
+            reasons.append("위험자산 약세")
     score = max(0, min(100, score))
-    if score >= 65:
-        label = f"{score}/100, 위험선호"
-    elif score >= 45:
-        label = f"{score}/100, 중립"
-    else:
-        label = f"{score}/100, 방어적"
+    label = f"{score}/100, 위험선호" if score >= 65 else f"{score}/100, 중립" if score >= 45 else f"{score}/100, 방어적"
     return label, ", ".join(reasons[:4]) or "뚜렷한 방향성은 제한적"
 
 
-def one_line_conclusion(temperature: str, markets: list[str], indicators: list[Indicator]) -> str:
+def one_line_conclusion(temperature: str, indicators: list[Indicator]) -> str:
     text = "오늘은 확인 후 대응이 유리한 중립 장세입니다."
     if "위험선호" in temperature:
         text = "오늘은 강한 종목 위주로 선별 접근할 수 있는 장세입니다."
     elif "방어적" in temperature:
         text = "오늘은 추격보다 현금 비중과 리스크 관리가 우선인 장세입니다."
-
     for item in indicators:
         if item.name == "USD/KRW" and item.change > 0.4:
             return text + " 특히 환율 상승 부담을 같이 봐야 합니다."
@@ -384,7 +343,7 @@ def one_line_conclusion(temperature: str, markets: list[str], indicators: list[I
 def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -> list[str]:
     titles = " ".join(item.title for items in news.values() for item in items).lower()
     checks = []
-    sector_keywords = [
+    sectors = [
         ("반도체", ["semiconductor", "chip", "nvidia", "삼성전자", "sk하이닉스", "반도체"]),
         ("2차전지", ["battery", "배터리", "2차전지", "전기차", "ev"]),
         ("자동차", ["auto", "자동차", "현대차", "기아"]),
@@ -393,14 +352,9 @@ def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -
         ("바이오", ["bio", "healthcare", "제약", "바이오"]),
         ("AI/전력", ["ai", "power", "electricity", "data center", "전력", "데이터센터"]),
     ]
-
-    for sector, keywords in sector_keywords:
+    for sector, keywords in sectors:
         hit = any(keyword in titles for keyword in keywords)
-        if hit:
-            checks.append(f"- {sector}: 최근 뉴스가 있어 장중 수급 확인")
-        else:
-            checks.append(f"- {sector}: 뉴스 모멘텀은 제한적, 지수 대비 상대강도 확인")
-
+        checks.append(f"- {sector}: {'최근 뉴스가 있어 장중 수급 확인' if hit else '뉴스 모멘텀은 제한적, 지수 대비 상대강도 확인'}")
     for item in indicators:
         if item.name == "미국 10년물 금리" and item.change > 1:
             checks.append("- 성장주: 금리 상승 부담으로 추격 매수 자제")
@@ -409,7 +363,7 @@ def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -
     return checks[:8]
 
 
-def freshness_note(markets: list[str], news: dict[str, list[NewsItem]]) -> str:
+def freshness_note(news: dict[str, list[NewsItem]]) -> str:
     news_times = [item.published_at for items in news.values() for item in items if item.published_at is not None]
     if not news_times:
         news_part = "뉴스 발행시각 확인 불가"
@@ -417,26 +371,17 @@ def freshness_note(markets: list[str], news: dict[str, list[NewsItem]]) -> str:
         latest_news = max(news_times)
         hours = (now_kst() - latest_news).total_seconds() / 3600
         news_part = f"최신 뉴스 {format_dt(latest_news)} 기준, 약 {hours:.1f}시간 전"
-    market_part = "시장 데이터 기준은 각 항목 괄호 안에 표시"
-    return f"{market_part}. {news_part}."
+    return f"시장 데이터 기준은 각 항목 괄호 안에 표시. {news_part}."
 
 
-def simple_report(
-    weather: str,
-    markets: list[str],
-    indicators: list[Indicator],
-    news: dict[str, list[NewsItem]],
-    korea: list[Pick],
-    us: list[Pick],
-) -> str:
+def simple_report(weather: str, markets: list[str], indicators: list[Indicator], news: dict[str, list[NewsItem]], korea: list[Pick]) -> str:
     generated_at = now_kst().strftime("%Y-%m-%d %H:%M")
     temperature, temperature_reason = market_temperature(markets, indicators)
-    conclusion = one_line_conclusion(temperature, markets, indicators)
     lines = [
         f"[{generated_at} KST] 데일리 시황 브리프",
-        f"최신성 체크: {freshness_note(markets, news)}",
+        f"최신성 체크: {freshness_note(news)}",
         "",
-        f"한 줄 결론: {conclusion}",
+        f"한 줄 결론: {one_line_conclusion(temperature, indicators)}",
         f"시장 온도계: {temperature}",
         f"온도계 근거: {temperature_reason}",
         "",
@@ -451,14 +396,13 @@ def simple_report(
         "3. 오늘의 해석",
         "- 국내 지수는 KRX 데이터를 우선 사용합니다. 값 옆에 Yahoo가 붙으면 임시 대체 데이터입니다.",
         "- 미국 지수는 직전 정규장 종가 기준일 수 있고, 환율/유가/비트코인은 가능한 시간봉 최신값을 사용합니다.",
-        "- 관심종목은 중대형주 안에서 1일, 5일, 20일 흐름을 섞어 고릅니다.",
+        "- 해외 개별종목 후보는 제외하고 국내 중대형주 후보만 표시합니다.",
         "",
         "4. 섹터별 체크",
         *sector_check(news, indicators),
         "",
         "5. 주요뉴스",
     ]
-
     for section, items in news.items():
         lines.append(f"[{section}]")
         if not items:
@@ -467,45 +411,26 @@ def simple_report(
         for item in items[:4]:
             lines.append(f"- [{format_dt(item.published_at)}] {item.title}")
             lines.append(f"  {item.link}")
-
     lines.extend(["", "6. 국내 중대형주 관심후보"])
     for pick in korea:
-        lines.extend(
-            [
-                f"- {pick.name}({pick.ticker})",
-                f"  현재가: {pick.close:,.2f} (기준 {pick.as_of})",
-                f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
-                f"  근거: {pick_commentary(pick)}",
-                f"  {check_price_text(pick)}",
-                f"  리스크: {pick_risk(pick)}",
-            ]
-        )
-
-    lines.extend(["", "7. 미국 중대형주 관심후보"])
-    for pick in us:
-        lines.extend(
-            [
-                f"- {pick.name}({pick.ticker})",
-                f"  현재가: {pick.close:,.2f} (기준 {pick.as_of})",
-                f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
-                f"  근거: {pick_commentary(pick)}",
-                f"  {check_price_text(pick)}",
-                f"  리스크: {pick_risk(pick)}",
-            ]
-        )
-
-    lines.extend(
-        [
-            "",
-            "8. 오늘 확인할 것",
-            "- 국내: 반도체, 자동차, 금융, 2차전지 업종 수급",
-            "- 미국: 대형 기술주, 헬스케어, 금리 민감 업종 흐름",
-            "- 매크로: 환율, 미 국채금리, 원유, 지정학 뉴스",
-            f"- 시장 바로가기: {MARKET_LINK}",
-            "",
-            "주의: 자동화된 관심종목 후보이며 매수/매도 지시가 아닙니다.",
-        ]
-    )
+        lines.extend([
+            f"- {pick.name}({pick.ticker})",
+            f"  현재가: {pick.close:,.2f} (기준 {pick.as_of})",
+            f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
+            f"  근거: {pick_commentary(pick)}",
+            f"  {check_price_text(pick)}",
+            f"  리스크: {pick_risk(pick)}",
+        ])
+    lines.extend([
+        "",
+        "7. 오늘 확인할 것",
+        "- 국내: 반도체, 자동차, 금융, 2차전지 업종 수급",
+        "- 미국: 대형 기술주, 헬스케어, 금리 민감 업종 흐름",
+        "- 매크로: 환율, 미 국채금리, 원유, 지정학 뉴스",
+        f"- 시장 바로가기: {MARKET_LINK}",
+        "",
+        "주의: 자동화된 관심종목 후보이며 매수/매도 지시가 아닙니다.",
+    ])
     return "\n".join(lines)
 
 
@@ -513,7 +438,6 @@ def ai_refine_report(draft: str) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or OpenAI is None:
         return draft
-
     client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
@@ -521,9 +445,8 @@ def ai_refine_report(draft: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "너는 한국 개인투자자를 위한 아침 시황 비서다. "
-                    "과장하지 말고, 중대형주 관심후보를 근거와 리스크 중심으로 요약한다. "
-                    "매수/매도 지시처럼 쓰지 않는다. 뉴스 링크는 반드시 유지한다. "
+                    "너는 한국 개인투자자를 위한 아침 시황 비서다. 과장하지 말고 근거와 리스크 중심으로 요약한다. "
+                    "해외 개별종목 추천은 절대 넣지 않는다. 뉴스 링크는 반드시 유지한다. "
                     "원문 맨 위의 생성시각, 최신성 체크, 데이터 기준시각, 뉴스 발행시각은 삭제하거나 바꾸지 않는다."
                 ),
             },
@@ -531,8 +454,8 @@ def ai_refine_report(draft: str) -> str:
                 "role": "user",
                 "content": (
                     "아래 원자료를 카카오톡으로 읽기 좋은 한국어 리포트로 다듬어줘. "
-                    "시황, 업종, 주요뉴스, 국내 후보 2개, 미국 후보 2개, 리스크를 포함하고 "
-                    "너무 짧지 않게 작성해줘. 생성시각과 최신성 체크 문장은 맨 위에 그대로 유지해줘.\n\n"
+                    "시황, 업종, 주요뉴스, 국내 후보 2개, 리스크를 포함하고 해외 개별종목 추천은 넣지 마. "
+                    "생성시각과 최신성 체크 문장은 맨 위에 그대로 유지해줘.\n\n"
                     f"{draft}"
                 ),
             },
@@ -546,30 +469,13 @@ def ai_refine_report(draft: str) -> str:
 def refresh_kakao_access_token() -> str:
     rest_api_key = os.getenv("KAKAO_REST_API_KEY")
     refresh_token = os.getenv("KAKAO_REFRESH_TOKEN")
-    missing = [
-        name
-        for name, value in {
-            "KAKAO_REST_API_KEY": rest_api_key,
-            "KAKAO_REFRESH_TOKEN": refresh_token,
-        }.items()
-        if not value
-    ]
+    missing = [name for name, value in {"KAKAO_REST_API_KEY": rest_api_key, "KAKAO_REFRESH_TOKEN": refresh_token}.items() if not value]
     if missing:
-        raise RuntimeError(
-            ".env 파일에 다음 값이 비어 있습니다: "
-            + ", ".join(missing)
-            + "\nnotepad .env 로 열어서 값을 채운 뒤 저장하세요."
-        )
-
-    data = {
-        "grant_type": "refresh_token",
-        "client_id": rest_api_key,
-        "refresh_token": refresh_token,
-    }
+        raise RuntimeError(".env 파일에 다음 값이 비어 있습니다: " + ", ".join(missing))
+    data = {"grant_type": "refresh_token", "client_id": rest_api_key, "refresh_token": refresh_token}
     client_secret = os.getenv("KAKAO_CLIENT_SECRET")
     if client_secret:
         data["client_secret"] = client_secret
-
     response = requests.post(KAKAO_TOKEN_URL, data=data, timeout=20)
     response.raise_for_status()
     return response.json()["access_token"]
@@ -603,10 +509,7 @@ def send_kakao_message(text: str) -> None:
         template = {
             "object_type": "text",
             "text": prefix + chunk,
-            "link": {
-                "web_url": MARKET_LINK,
-                "mobile_web_url": MARKET_LINK,
-            },
+            "link": {"web_url": MARKET_LINK, "mobile_web_url": MARKET_LINK},
             "button_title": "시장 확인",
         }
         response = requests.post(
@@ -624,8 +527,7 @@ def build_report() -> str:
     markets = fetch_market_snapshot(indicators)
     news = fetch_news()
     korea = score_watchlist(KOREA_WATCHLIST)
-    us = score_watchlist(US_WATCHLIST)
-    draft = simple_report(weather, markets, indicators, news, korea, us)
+    draft = simple_report(weather, markets, indicators, news, korea)
     return ai_refine_report(draft)
 
 
