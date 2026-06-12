@@ -34,24 +34,56 @@ KOREA_WATCHLIST = {
     "000660.KS": "SK하이닉스",
     "005380.KS": "현대차",
     "000270.KS": "기아",
+    "012330.KS": "현대모비스",
     "035420.KS": "NAVER",
     "035720.KS": "카카오",
-    "051910.KS": "LG화학",
+    "068270.KS": "셀트리온",
     "207940.KS": "삼성바이오로직스",
+    "051910.KS": "LG화학",
+    "373220.KS": "LG에너지솔루션",
+    "006400.KS": "삼성SDI",
     "005490.KS": "POSCO홀딩스",
+    "003670.KS": "포스코퓨처엠",
     "105560.KS": "KB금융",
     "055550.KS": "신한지주",
-    "012330.KS": "현대모비스",
+    "086790.KS": "하나금융지주",
+    "032830.KS": "삼성생명",
+    "028260.KS": "삼성물산",
+    "009540.KS": "HD한국조선해양",
+    "329180.KS": "HD현대중공업",
+    "012450.KS": "한화에어로스페이스",
+    "042660.KS": "한화오션",
+    "034020.KS": "두산에너빌리티",
+}
+
+KOREA_BUCKETS = [
+    {"005930.KS", "000660.KS", "035420.KS", "035720.KS", "068270.KS", "207940.KS"},
+    {"005380.KS", "000270.KS", "012330.KS", "005490.KS", "003670.KS", "028260.KS"},
+    {"051910.KS", "373220.KS", "006400.KS", "105560.KS", "055550.KS", "086790.KS", "032830.KS"},
+    {"009540.KS", "329180.KS", "012450.KS", "042660.KS", "034020.KS"},
+]
+
+SECTOR_KEYWORDS = {
+    "반도체/AI": ["반도체", "chip", "semiconductor", "nvidia", "ai", "삼성전자", "하이닉스"],
+    "자동차": ["자동차", "현대차", "기아", "auto", "ev"],
+    "2차전지/소재": ["배터리", "2차전지", "전기차", "battery", "리튬", "소재"],
+    "금융": ["은행", "금융", "금리", "보험", "주주환원"],
+    "조선/방산/전력": ["조선", "방산", "방위", "전력", "원전", "shipbuilding", "defense"],
+    "바이오/플랫폼": ["바이오", "제약", "셀트리온", "네이버", "카카오", "플랫폼"],
+}
+
+TICKER_SECTOR = {
+    "005930.KS": "반도체/AI", "000660.KS": "반도체/AI",
+    "035420.KS": "바이오/플랫폼", "035720.KS": "바이오/플랫폼", "068270.KS": "바이오/플랫폼", "207940.KS": "바이오/플랫폼",
+    "005380.KS": "자동차", "000270.KS": "자동차", "012330.KS": "자동차",
+    "051910.KS": "2차전지/소재", "373220.KS": "2차전지/소재", "006400.KS": "2차전지/소재", "005490.KS": "2차전지/소재", "003670.KS": "2차전지/소재",
+    "105560.KS": "금융", "055550.KS": "금융", "086790.KS": "금융", "032830.KS": "금융",
+    "009540.KS": "조선/방산/전력", "329180.KS": "조선/방산/전력", "012450.KS": "조선/방산/전력", "042660.KS": "조선/방산/전력", "034020.KS": "조선/방산/전력",
 }
 
 US_MARKET_TICKERS = {
-    "^GSPC": "S&P 500",
-    "^IXIC": "NASDAQ",
-    "^DJI": "Dow",
-    "KRW=X": "USD/KRW",
-    "^TNX": "미국 10년물 금리",
-    "CL=F": "WTI 유가",
-    "BTC-USD": "비트코인",
+    "^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^DJI": "Dow", "KRW=X": "USD/KRW",
+    "^TNX": "미국 10년물 금리", "CL=F": "WTI 유가", "BTC-USD": "비트코인",
 }
 
 NEWS_QUERIES = {
@@ -71,6 +103,8 @@ class Pick:
     twenty_day: float
     close: float
     as_of: str
+    sector: str
+    selection_reason: str
 
 
 @dataclass
@@ -157,7 +191,6 @@ def fetch_weather() -> str:
 def fetch_krx_index_snapshot() -> list[str]:
     if stock is None:
         return []
-
     today = now_kst().date()
     start = (today - timedelta(days=14)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
@@ -245,22 +278,50 @@ def fetch_news() -> dict[str, list[NewsItem]]:
     return result
 
 
-def score_watchlist(watchlist: dict[str, str]) -> list[Pick]:
+def news_sector_scores(news: dict[str, list[NewsItem]]) -> dict[str, int]:
+    titles = " ".join(item.title for items in news.values() for item in items).lower()
+    return {sector: sum(1 for keyword in keywords if keyword.lower() in titles) for sector, keywords in SECTOR_KEYWORDS.items()}
+
+
+def score_watchlist(watchlist: dict[str, str], news: dict[str, list[NewsItem]]) -> list[Pick]:
+    today = now_kst().date()
+    bucket = KOREA_BUCKETS[today.toordinal() % len(KOREA_BUCKETS)]
+    sector_scores = news_sector_scores(news)
     picks = []
     for ticker, name in watchlist.items():
         try:
-            history = yf.Ticker(ticker).history(period="2mo", interval="1d", auto_adjust=True)
+            history = yf.Ticker(ticker).history(period="3mo", interval="1d", auto_adjust=True)
             close = history["Close"].dropna()
+            volume = history["Volume"].dropna() if "Volume" in history else []
             if len(close) < 25:
                 continue
             one = pct_change(close, 1)
             five = pct_change(close, 5)
             twenty = pct_change(close, 20)
-            score = (five * 0.45) + (twenty * 0.35) + (one * 0.20)
-            picks.append(Pick(ticker, name, score, one, five, twenty, float(close.iloc[-1]), latest_index_label(close.index)))
+            vol_score = 0.0
+            if len(volume) >= 21 and float(volume.iloc[-21:-1].mean()) > 0:
+                vol_score = min((float(volume.iloc[-1]) / float(volume.iloc[-21:-1].mean()) - 1) * 3, 12)
+            sector = TICKER_SECTOR.get(ticker, "기타")
+            news_score = min(sector_scores.get(sector, 0) * 3, 12)
+            rotation_bonus = 6 if ticker in bucket else 0
+            overheat_penalty = 8 if one > 5 or twenty > 25 else 0
+            falling_penalty = 6 if five < -8 else 0
+            score = (five * 0.35) + (twenty * 0.25) + (one * 0.15) + vol_score + news_score + rotation_bonus - overheat_penalty - falling_penalty
+            reason = f"{sector} 섹터, {'오늘 순환 후보군 포함' if ticker in bucket else '보조 후보군'}, 뉴스점수 {news_score:.0f}, 거래량점수 {vol_score:.1f}"
+            picks.append(Pick(ticker, name, score, one, five, twenty, float(close.iloc[-1]), latest_index_label(close.index), sector, reason))
         except Exception:
             continue
-    return sorted(picks, key=lambda pick: pick.score, reverse=True)[:2]
+    picks = sorted(picks, key=lambda pick: pick.score, reverse=True)
+    selected = []
+    used_sectors = set()
+    for pick in picks:
+        if pick.sector in used_sectors and len(selected) < 2:
+            continue
+        selected.append(pick)
+        used_sectors.add(pick.sector)
+        if len(selected) == 2:
+            return selected
+    return picks[:2]
 
 
 def pick_commentary(pick: Pick) -> str:
@@ -341,20 +402,13 @@ def one_line_conclusion(temperature: str, indicators: list[Indicator]) -> str:
 
 
 def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -> list[str]:
-    titles = " ".join(item.title for items in news.values() for item in items).lower()
+    scores = news_sector_scores(news)
     checks = []
-    sectors = [
-        ("반도체", ["semiconductor", "chip", "nvidia", "삼성전자", "sk하이닉스", "반도체"]),
-        ("2차전지", ["battery", "배터리", "2차전지", "전기차", "ev"]),
-        ("자동차", ["auto", "자동차", "현대차", "기아"]),
-        ("금융", ["bank", "금리", "은행", "금융"]),
-        ("조선/방산", ["shipbuilding", "defense", "조선", "방산"]),
-        ("바이오", ["bio", "healthcare", "제약", "바이오"]),
-        ("AI/전력", ["ai", "power", "electricity", "data center", "전력", "데이터센터"]),
-    ]
-    for sector, keywords in sectors:
-        hit = any(keyword in titles for keyword in keywords)
-        checks.append(f"- {sector}: {'최근 뉴스가 있어 장중 수급 확인' if hit else '뉴스 모멘텀은 제한적, 지수 대비 상대강도 확인'}")
+    for sector in SECTOR_KEYWORDS:
+        if scores.get(sector, 0):
+            checks.append(f"- {sector}: 최근 뉴스가 있어 장중 수급 확인")
+        else:
+            checks.append(f"- {sector}: 뉴스 모멘텀은 제한적, 지수 대비 상대강도 확인")
     for item in indicators:
         if item.name == "미국 10년물 금리" and item.change > 1:
             checks.append("- 성장주: 금리 상승 부담으로 추격 매수 자제")
@@ -394,8 +448,8 @@ def simple_report(weather: str, markets: list[str], indicators: list[Indicator],
         *[f"- {item.display}" for item in indicators if item.name in {"USD/KRW", "미국 10년물 금리", "WTI 유가", "비트코인"}],
         "",
         "3. 오늘의 해석",
-        "- 국내 지수는 KRX 데이터를 우선 사용합니다. 값 옆에 Yahoo가 붙으면 임시 대체 데이터입니다.",
-        "- 미국 지수는 직전 정규장 종가 기준일 수 있고, 환율/유가/비트코인은 가능한 시간봉 최신값을 사용합니다.",
+        "- 국내 후보는 확정 순위가 아니라 당일 순환 후보군, 뉴스 섹터, 가격 흐름, 거래량을 섞어 고릅니다.",
+        "- 같은 섹터 2개가 동시에 뽑히지 않도록 분산합니다.",
         "- 해외 개별종목 후보는 제외하고 국내 중대형주 후보만 표시합니다.",
         "",
         "4. 섹터별 체크",
@@ -417,6 +471,7 @@ def simple_report(weather: str, markets: list[str], indicators: list[Indicator],
             f"- {pick.name}({pick.ticker})",
             f"  현재가: {pick.close:,.2f} (기준 {pick.as_of})",
             f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
+            f"  선정방식: {pick.selection_reason}",
             f"  근거: {pick_commentary(pick)}",
             f"  {check_price_text(pick)}",
             f"  리스크: {pick_risk(pick)}",
@@ -424,8 +479,8 @@ def simple_report(weather: str, markets: list[str], indicators: list[Indicator],
     lines.extend([
         "",
         "7. 오늘 확인할 것",
-        "- 국내: 반도체, 자동차, 금융, 2차전지 업종 수급",
-        "- 미국: 대형 기술주, 헬스케어, 금리 민감 업종 흐름",
+        "- 국내: 반도체, 자동차, 금융, 2차전지, 조선/방산, 바이오/플랫폼 수급",
+        "- 미국: 대형 기술주, 금리 민감 업종 흐름",
         "- 매크로: 환율, 미 국채금리, 원유, 지정학 뉴스",
         f"- 시장 바로가기: {MARKET_LINK}",
         "",
@@ -447,7 +502,7 @@ def ai_refine_report(draft: str) -> str:
                 "content": (
                     "너는 한국 개인투자자를 위한 아침 시황 비서다. 과장하지 말고 근거와 리스크 중심으로 요약한다. "
                     "해외 개별종목 추천은 절대 넣지 않는다. 뉴스 링크는 반드시 유지한다. "
-                    "원문 맨 위의 생성시각, 최신성 체크, 데이터 기준시각, 뉴스 발행시각은 삭제하거나 바꾸지 않는다."
+                    "원문 맨 위의 생성시각, 최신성 체크, 데이터 기준시각, 뉴스 발행시각, 선정방식은 삭제하거나 바꾸지 않는다."
                 ),
             },
             {
@@ -526,7 +581,7 @@ def build_report() -> str:
     indicators = fetch_macro_indicators()
     markets = fetch_market_snapshot(indicators)
     news = fetch_news()
-    korea = score_watchlist(KOREA_WATCHLIST)
+    korea = score_watchlist(KOREA_WATCHLIST, news)
     draft = simple_report(weather, markets, indicators, news, korea)
     return ai_refine_report(draft)
 
