@@ -2,19 +2,36 @@ name: Daily Kakao Market Brief
 
 on:
   schedule:
-    - cron: "0 23 * * *"
+    # GitHub Actions cron uses UTC. 23:10 UTC = 08:10 KST.
+    # Avoid minute 0 because scheduled runs can be delayed or dropped near the top of the hour.
+    - cron: "10 23 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-kakao-market-brief-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   send-brief:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Print schedule context
+        run: |
+          echo "Trigger: ${{ github.event_name }}"
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "KST now: $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S')"
       - name: Send Kakao brief
         env:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
