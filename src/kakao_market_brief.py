@@ -1,8 +1,10 @@
 import json
 import os
 import textwrap
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -22,6 +24,7 @@ except ImportError:
 
 
 KST = ZoneInfo("Asia/Seoul")
+UTC = ZoneInfo("UTC")
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 KAKAO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
 MARKET_LINK = "https://m.stock.naver.com/"
@@ -66,10 +69,10 @@ US_MARKET_TICKERS = {
     "BTC-USD": "비트코인",
 }
 
-NEWS_FEEDS = {
-    "국내 주요뉴스": "https://news.google.com/rss/search?q=%ED%95%9C%EA%B5%AD+%EA%B2%BD%EC%A0%9C+%EC%A6%9D%EC%8B%9C+%EC%82%B0%EC%97%85&hl=ko&gl=KR&ceid=KR:ko",
-    "미국 주식뉴스": "https://news.google.com/rss/search?q=US+stock+market+earnings+Fed+sector&hl=ko&gl=KR&ceid=KR:ko",
-    "세계 주요뉴스": "https://news.google.com/rss/search?q=global+economy+geopolitics+markets+oil+rates&hl=ko&gl=KR&ceid=KR:ko",
+NEWS_QUERIES = {
+    "국내 주요뉴스": "한국 경제 증시 산업 when:1d",
+    "미국 주식뉴스": "US stock market earnings Fed sector when:1d",
+    "세계 주요뉴스": "global economy geopolitics markets oil rates when:1d",
 }
 
 
@@ -82,12 +85,14 @@ class Pick:
     five_day: float
     twenty_day: float
     close: float
+    as_of: str
 
 
 @dataclass
 class NewsItem:
     title: str
     link: str
+    published_at: datetime | None
 
 
 @dataclass
@@ -96,6 +101,32 @@ class Indicator:
     value: float
     change: float
     display: str
+    as_of: str
+
+
+def now_kst() -> datetime:
+    return datetime.now(KST)
+
+
+def format_dt(dt: datetime | None) -> str:
+    if dt is None:
+        return "발행시각 미확인"
+    return dt.astimezone(KST).strftime("%m-%d %H:%M")
+
+
+def latest_index_label(index) -> str:
+    if len(index) == 0:
+        return "기준시각 미확인"
+    latest = index[-1]
+    try:
+        if getattr(latest, "tzinfo", None) is None:
+            latest = latest.tz_localize(UTC)
+        return latest.tz_convert(KST).strftime("%m-%d %H:%M")
+    except Exception:
+        try:
+            return latest.strftime("%Y-%m-%d")
+        except Exception:
+            return str(latest)
 
 
 def pct_change(series, days: int) -> float:
@@ -106,6 +137,17 @@ def pct_change(series, days: int) -> float:
     if start == 0:
         return 0.0
     return (end / start - 1) * 100
+
+
+def news_feed_url(query: str) -> str:
+    params = {
+        "q": query,
+        "hl": "ko",
+        "gl": "KR",
+        "ceid": "KR:ko",
+        "_": str(int(time.time())),
+    }
+    return "https://news.google.com/rss/search?" + urlencode(params)
 
 
 def fetch_weather() -> str:
@@ -122,11 +164,12 @@ def fetch_weather() -> str:
         data = requests.get(url, timeout=20).json()
         current = data["current"]
         daily = data["daily"]
+        observed = current.get("time", "시각 미확인")
         return (
             f"{city} 현재 {current['temperature_2m']}도, 강수 {current['precipitation']}mm, "
             f"풍속 {current['wind_speed_10m']}km/h. "
             f"오늘 {daily['temperature_2m_min'][0]}~{daily['temperature_2m_max'][0]}도, "
-            f"강수확률 {daily['precipitation_probability_max'][0]}%."
+            f"강수확률 {daily['precipitation_probability_max'][0]}%. 기준 {observed}"
         )
     except Exception as exc:
         return f"날씨 정보를 가져오지 못했습니다: {exc}"
@@ -136,7 +179,7 @@ def fetch_krx_index_snapshot() -> list[str]:
     if stock is None:
         return []
 
-    today = datetime.now(KST).date()
+    today = now_kst().date()
     start = (today - timedelta(days=14)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
     indices = {"1001": "KOSPI", "2001": "KOSDAQ"}
@@ -149,10 +192,40 @@ def fetch_krx_index_snapshot() -> list[str]:
                 continue
             close = frame["종가"].dropna()
             change = pct_change(close, 1)
-            lines.append(f"{name}: {close.iloc[-1]:,.2f} ({change:+.2f}%, KRX)")
+            as_of = close.index[-1].strftime("%Y-%m-%d")
+            lines.append(f"{name}: {close.iloc[-1]:,.2f} ({change:+.2f}%, KRX, 기준 {as_of})")
         except Exception:
             continue
     return lines
+
+
+def fetch_macro_indicators() -> list[Indicator]:
+    indicators = []
+    for ticker, name in US_MARKET_TICKERS.items():
+        try:
+            interval = "1h" if ticker in {"KRW=X", "BTC-USD", "CL=F"} else "1d"
+            period = "5d" if interval == "1h" else "7d"
+            history = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+            close = history["Close"].dropna()
+            if len(close) < 2:
+                continue
+            change = pct_change(close, 1)
+            value = float(close.iloc[-1])
+            as_of = latest_index_label(close.index)
+            if ticker == "^TNX":
+                display = f"{name}: {value:.2f}%p ({change:+.2f}%, 기준 {as_of})"
+            elif ticker == "KRW=X":
+                display = f"{name}: {value:,.2f}원 ({change:+.2f}%, 기준 {as_of})"
+            elif ticker == "BTC-USD":
+                display = f"{name}: ${value:,.0f} ({change:+.2f}%, 기준 {as_of})"
+            elif ticker == "CL=F":
+                display = f"{name}: ${value:,.2f} ({change:+.2f}%, 기준 {as_of})"
+            else:
+                display = f"{name}: {value:,.2f} ({change:+.2f}%, 기준 {as_of})"
+            indicators.append(Indicator(name, value, change, display, as_of))
+        except Exception:
+            continue
+    return indicators
 
 
 def fetch_yahoo_market_snapshot(indicators: list[Indicator] | None = None) -> list[str]:
@@ -160,57 +233,44 @@ def fetch_yahoo_market_snapshot(indicators: list[Indicator] | None = None) -> li
     return [indicator.display for indicator in indicators]
 
 
-def fetch_macro_indicators() -> list[Indicator]:
-    indicators = []
-    for ticker, name in US_MARKET_TICKERS.items():
-        try:
-            history = yf.Ticker(ticker).history(period="7d", interval="1d", auto_adjust=False)
-            close = history["Close"].dropna()
-            if len(close) < 2:
-                continue
-            change = pct_change(close, 1)
-            value = float(close.iloc[-1])
-            suffix = "%"
-            if ticker == "^TNX":
-                display = f"{name}: {value:.2f}%p ({change:+.2f}%)"
-            elif ticker == "KRW=X":
-                display = f"{name}: {value:,.2f}원 ({change:+.2f}%)"
-            elif ticker == "BTC-USD":
-                display = f"{name}: ${value:,.0f} ({change:+.2f}%)"
-            elif ticker == "CL=F":
-                display = f"{name}: ${value:,.2f} ({change:+.2f}%)"
-            else:
-                display = f"{name}: {value:,.2f} ({change:+.2f}%)"
-            indicators.append(Indicator(name, value, change, display))
-        except Exception:
-            continue
-    return indicators
-
-
 def fetch_market_snapshot(indicators: list[Indicator] | None = None) -> list[str]:
     krx_lines = fetch_krx_index_snapshot()
     if not krx_lines:
-        # pykrx 설치 전에도 돌아가게 하기 위한 임시 대체값입니다.
         for ticker, name in {"^KS11": "KOSPI", "^KQ11": "KOSDAQ"}.items():
             try:
                 history = yf.Ticker(ticker).history(period="7d", interval="1d", auto_adjust=False)
                 close = history["Close"].dropna()
                 if len(close) < 2:
                     continue
-                krx_lines.append(f"{name}: {close.iloc[-1]:,.2f} ({pct_change(close, 1):+.2f}%, Yahoo)")
+                as_of = latest_index_label(close.index)
+                krx_lines.append(
+                    f"{name}: {close.iloc[-1]:,.2f} ({pct_change(close, 1):+.2f}%, Yahoo, 기준 {as_of})"
+                )
             except Exception:
                 continue
     return krx_lines + fetch_yahoo_market_snapshot(indicators)
 
 
+def parse_published(entry) -> datetime | None:
+    parsed = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if not parsed:
+        return None
+    return datetime(*parsed[:6], tzinfo=UTC).astimezone(KST)
+
+
 def fetch_news() -> dict[str, list[NewsItem]]:
     result = {}
-    for section, url in NEWS_FEEDS.items():
-        feed = feedparser.parse(url)
-        result[section] = [
-            NewsItem(title=entry.title, link=entry.link)
-            for entry in feed.entries[:5]
-        ]
+    cutoff = now_kst() - timedelta(hours=48)
+    for section, query in NEWS_QUERIES.items():
+        feed = feedparser.parse(news_feed_url(query))
+        items = []
+        for entry in feed.entries:
+            published_at = parse_published(entry)
+            if published_at is not None and published_at < cutoff:
+                continue
+            items.append(NewsItem(title=entry.title, link=entry.link, published_at=published_at))
+        items.sort(key=lambda item: item.published_at or datetime.min.replace(tzinfo=KST), reverse=True)
+        result[section] = items[:6]
     return result
 
 
@@ -226,7 +286,7 @@ def score_watchlist(watchlist: dict[str, str]) -> list[Pick]:
             five = pct_change(close, 5)
             twenty = pct_change(close, 20)
             score = (five * 0.45) + (twenty * 0.35) + (one * 0.20)
-            picks.append(Pick(ticker, name, score, one, five, twenty, float(close.iloc[-1])))
+            picks.append(Pick(ticker, name, score, one, five, twenty, float(close.iloc[-1]), latest_index_label(close.index)))
         except Exception:
             continue
     return sorted(picks, key=lambda pick: pick.score, reverse=True)[:2]
@@ -324,7 +384,6 @@ def one_line_conclusion(temperature: str, markets: list[str], indicators: list[I
 def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -> list[str]:
     titles = " ".join(item.title for items in news.values() for item in items).lower()
     checks = []
-
     sector_keywords = [
         ("반도체", ["semiconductor", "chip", "nvidia", "삼성전자", "sk하이닉스", "반도체"]),
         ("2차전지", ["battery", "배터리", "2차전지", "전기차", "ev"]),
@@ -338,7 +397,7 @@ def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -
     for sector, keywords in sector_keywords:
         hit = any(keyword in titles for keyword in keywords)
         if hit:
-            checks.append(f"- {sector}: 관련 뉴스가 있어 장중 수급 확인")
+            checks.append(f"- {sector}: 최근 뉴스가 있어 장중 수급 확인")
         else:
             checks.append(f"- {sector}: 뉴스 모멘텀은 제한적, 지수 대비 상대강도 확인")
 
@@ -350,6 +409,18 @@ def sector_check(news: dict[str, list[NewsItem]], indicators: list[Indicator]) -
     return checks[:8]
 
 
+def freshness_note(markets: list[str], news: dict[str, list[NewsItem]]) -> str:
+    news_times = [item.published_at for items in news.values() for item in items if item.published_at is not None]
+    if not news_times:
+        news_part = "뉴스 발행시각 확인 불가"
+    else:
+        latest_news = max(news_times)
+        hours = (now_kst() - latest_news).total_seconds() / 3600
+        news_part = f"최신 뉴스 {format_dt(latest_news)} 기준, 약 {hours:.1f}시간 전"
+    market_part = "시장 데이터 기준은 각 항목 괄호 안에 표시"
+    return f"{market_part}. {news_part}."
+
+
 def simple_report(
     weather: str,
     markets: list[str],
@@ -358,11 +429,12 @@ def simple_report(
     korea: list[Pick],
     us: list[Pick],
 ) -> str:
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    generated_at = now_kst().strftime("%Y-%m-%d %H:%M")
     temperature, temperature_reason = market_temperature(markets, indicators)
     conclusion = one_line_conclusion(temperature, markets, indicators)
     lines = [
-        f"[{today} 08:00] 데일리 시황 브리프",
+        f"[{generated_at} KST] 데일리 시황 브리프",
+        f"최신성 체크: {freshness_note(markets, news)}",
         "",
         f"한 줄 결론: {conclusion}",
         f"시장 온도계: {temperature}",
@@ -378,7 +450,7 @@ def simple_report(
         "",
         "3. 오늘의 해석",
         "- 국내 지수는 KRX 데이터를 우선 사용합니다. 값 옆에 Yahoo가 붙으면 임시 대체 데이터입니다.",
-        "- 미국 지수와 환율은 Yahoo Finance 데이터를 사용합니다.",
+        "- 미국 지수는 직전 정규장 종가 기준일 수 있고, 환율/유가/비트코인은 가능한 시간봉 최신값을 사용합니다.",
         "- 관심종목은 중대형주 안에서 1일, 5일, 20일 흐름을 섞어 고릅니다.",
         "",
         "4. 섹터별 체크",
@@ -389,8 +461,11 @@ def simple_report(
 
     for section, items in news.items():
         lines.append(f"[{section}]")
+        if not items:
+            lines.append("- 최근 48시간 내 확인된 뉴스가 부족합니다.")
+            continue
         for item in items[:4]:
-            lines.append(f"- {item.title}")
+            lines.append(f"- [{format_dt(item.published_at)}] {item.title}")
             lines.append(f"  {item.link}")
 
     lines.extend(["", "6. 국내 중대형주 관심후보"])
@@ -398,7 +473,7 @@ def simple_report(
         lines.extend(
             [
                 f"- {pick.name}({pick.ticker})",
-                f"  현재가: {pick.close:,.2f}",
+                f"  현재가: {pick.close:,.2f} (기준 {pick.as_of})",
                 f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
                 f"  근거: {pick_commentary(pick)}",
                 f"  {check_price_text(pick)}",
@@ -411,7 +486,7 @@ def simple_report(
         lines.extend(
             [
                 f"- {pick.name}({pick.ticker})",
-                f"  현재가: {pick.close:,.2f}",
+                f"  현재가: {pick.close:,.2f} (기준 {pick.as_of})",
                 f"  흐름: 1일 {pick.one_day:+.2f}%, 5일 {pick.five_day:+.2f}%, 20일 {pick.twenty_day:+.2f}%",
                 f"  근거: {pick_commentary(pick)}",
                 f"  {check_price_text(pick)}",
@@ -448,7 +523,8 @@ def ai_refine_report(draft: str) -> str:
                 "content": (
                     "너는 한국 개인투자자를 위한 아침 시황 비서다. "
                     "과장하지 말고, 중대형주 관심후보를 근거와 리스크 중심으로 요약한다. "
-                    "매수/매도 지시처럼 쓰지 않는다. 뉴스 링크는 반드시 유지한다."
+                    "매수/매도 지시처럼 쓰지 않는다. 뉴스 링크는 반드시 유지한다. "
+                    "원문 맨 위의 생성시각, 최신성 체크, 데이터 기준시각, 뉴스 발행시각은 삭제하거나 바꾸지 않는다."
                 ),
             },
             {
@@ -456,12 +532,12 @@ def ai_refine_report(draft: str) -> str:
                 "content": (
                     "아래 원자료를 카카오톡으로 읽기 좋은 한국어 리포트로 다듬어줘. "
                     "시황, 업종, 주요뉴스, 국내 후보 2개, 미국 후보 2개, 리스크를 포함하고 "
-                    "너무 짧지 않게 작성해줘.\n\n"
+                    "너무 짧지 않게 작성해줘. 생성시각과 최신성 체크 문장은 맨 위에 그대로 유지해줘.\n\n"
                     f"{draft}"
                 ),
             },
         ],
-        temperature=0.3,
+        temperature=0.25,
         max_tokens=1800,
     )
     return response.choices[0].message.content.strip()
