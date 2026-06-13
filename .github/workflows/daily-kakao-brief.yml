@@ -2,9 +2,11 @@ name: Daily Kakao Market Brief
 
 on:
   schedule:
-    # GitHub Actions cron uses UTC. 23:10 UTC = 08:10 KST.
-    # Avoid minute 0 because scheduled runs can be delayed or dropped near the top of the hour.
-    - cron: "10 23 * * *"
+    # GitHub Actions cron uses UTC.
+    # These runs cover 07:50-08:30 KST in 5-minute steps.
+    # The guard step below prevents duplicate Kakao sends on the same KST date.
+    - cron: "50-59/5 22 * * *"
+    - cron: "0-30/5 23 * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,19 +24,43 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Guard send window and duplicates
+        id: guard
+        shell: bash
+        run: |
+          git pull --ff-only
+          kst_date="$(TZ=Asia/Seoul date '+%Y-%m-%d')"
+          kst_hhmm="$(TZ=Asia/Seoul date '+%H%M')"
+          echo "KST date: $kst_date"
+          echo "KST time: $kst_hhmm"
+          if [[ "${{ github.event_name }}" == "schedule" && "$kst_hhmm" < "0800" ]]; then
+            echo "Before 08:00 KST. Skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -f docs/last_kakao_sent.txt && "$(cat docs/last_kakao_sent.txt)" == "$kst_date" ]]; then
+            echo "Kakao brief already sent for $kst_date. Skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
+        if: steps.guard.outputs.should_run == 'true'
         with:
           python-version: "3.11"
       - name: Install dependencies
+        if: steps.guard.outputs.should_run == 'true'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Print schedule context
+        if: steps.guard.outputs.should_run == 'true'
         run: |
           echo "Trigger: ${{ github.event_name }}"
           echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S')"
           echo "KST now: $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S')"
       - name: Generate web brief
+        if: steps.guard.outputs.should_run == 'true'
         env:
           SEND_KAKAO: "0"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -43,6 +69,7 @@ jobs:
           REPORT_LON: ${{ secrets.REPORT_LON }}
         run: python src/kakao_market_brief.py
       - name: Publish web brief
+        if: steps.guard.outputs.should_run == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -54,6 +81,7 @@ jobs:
             git push
           fi
       - name: Send Kakao brief
+        if: steps.guard.outputs.should_run == 'true'
         env:
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
           KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
@@ -63,3 +91,15 @@ jobs:
           REPORT_LAT: ${{ secrets.REPORT_LAT }}
           REPORT_LON: ${{ secrets.REPORT_LON }}
         run: python src/kakao_market_brief.py
+      - name: Mark Kakao sent date
+        if: steps.guard.outputs.should_run == 'true'
+        run: |
+          git pull --ff-only
+          TZ=Asia/Seoul date '+%Y-%m-%d' > docs/last_kakao_sent.txt
+          git add docs/last_kakao_sent.txt
+          if git diff --cached --quiet; then
+            echo "Sent marker unchanged."
+          else
+            git commit -m "Mark Kakao brief sent date"
+            git push
+          fi
